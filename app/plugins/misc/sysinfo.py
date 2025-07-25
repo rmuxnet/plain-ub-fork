@@ -3,6 +3,8 @@ import psutil
 import os
 import socket
 import subprocess
+import re
+import shutil
 from datetime import datetime, timedelta
 from sys import version_info
 
@@ -38,16 +40,43 @@ def get_android_info():
     """Get Android-specific information."""
     android_info = {}
     
+    # Helper function to run getprop safely
+    def getprop(prop):
+        try:
+            result = subprocess.run(['getprop', prop], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except:
+            pass
+        return None
+    
+    # Helper function to read files safely
+    def read_file(filepath):
+        try:
+            with open(filepath, 'r') as f:
+                return f.read().strip()
+        except (FileNotFoundError, PermissionError):
+            return None
+    
     try:
-        # Get Android version from build.prop
-        if os.path.exists('/system/build.prop'):
-            with open('/system/build.prop', 'r') as f:
-                for line in f:
+        # Get Android version and device info using getprop
+        android_info['version'] = getprop('ro.build.version.release')
+        android_info['model'] = getprop('ro.product.model')
+        android_info['brand'] = getprop('ro.product.manufacturer')
+        android_info['api_level'] = getprop('ro.build.version.sdk')
+        android_info['build_id'] = getprop('ro.build.id')
+        
+        # Fallback to build.prop if getprop fails
+        if not any(android_info.values()) and os.path.exists('/system/build.prop'):
+            build_prop = read_file('/system/build.prop')
+            if build_prop:
+                for line in build_prop.split('\n'):
                     if line.startswith('ro.build.version.release='):
                         android_info['version'] = line.split('=')[1].strip()
                     elif line.startswith('ro.product.model='):
                         android_info['model'] = line.split('=')[1].strip()
-                    elif line.startswith('ro.product.brand='):
+                    elif line.startswith('ro.product.manufacturer='):
                         android_info['brand'] = line.split('=')[1].strip()
                     elif line.startswith('ro.build.version.sdk='):
                         android_info['api_level'] = line.split('=')[1].strip()
@@ -58,24 +87,207 @@ def get_android_info():
     if 'TERMUX_VERSION' in os.environ:
         android_info['termux_version'] = os.environ['TERMUX_VERSION']
     
-    # Try to get device info from getprop command
-    try:
-        result = subprocess.run(['getprop', 'ro.product.model'], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            android_info['model'] = result.stdout.strip()
-    except:
-        pass
-    
-    try:
-        result = subprocess.run(['getprop', 'ro.build.version.release'], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            android_info['version'] = result.stdout.strip()
-    except:
-        pass
-    
     return android_info
+
+
+def get_cpu_info():
+    """Get detailed CPU information, especially for Android."""
+    try:
+        cpuinfo = None
+        with open('/proc/cpuinfo', 'r') as f:
+            cpuinfo = f.read()
+        
+        if not cpuinfo:
+            return platform.processor() or "Unknown CPU", psutil.cpu_count(logical=True)
+        
+        lines = cpuinfo.split('\n')
+        cpu_model = None
+        cores = 0
+        max_freq = None
+        
+        for line in lines:
+            if line.startswith('model name'):
+                cpu_model = line.split(':', 1)[1].strip()
+            elif line.startswith('Hardware'):
+                if not cpu_model:  # Android devices often use Hardware instead
+                    cpu_model = line.split(':', 1)[1].strip()
+            elif line.startswith('Processor'):
+                if not cpu_model:
+                    cpu_model = line.split(':', 1)[1].strip()
+            elif line.startswith('processor'):
+                cores += 1
+        
+        # Try to get max frequency
+        freq_file = '/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq'
+        if os.path.exists(freq_file):
+            try:
+                with open(freq_file, 'r') as f:
+                    freq_data = f.read().strip()
+                    if freq_data.isdigit():
+                        freq_khz = int(freq_data)
+                        max_freq = freq_khz / 1000000  # Convert to GHz
+            except:
+                pass
+        
+        cpu_model = cpu_model or "Unknown CPU"
+        cores = cores or psutil.cpu_count(logical=True)
+        
+        return cpu_model, cores, max_freq
+        
+    except:
+        return platform.processor() or "Unknown CPU", psutil.cpu_count(logical=True), None
+
+
+def get_gpu_info():
+    """Get GPU information for Android devices."""
+    if not is_android():
+        return None
+    
+    try:
+        # Try getprop for GPU info
+        result = subprocess.run(['getprop', 'ro.hardware.vulkan'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        
+        result = subprocess.run(['getprop', 'ro.hardware.egl'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        
+        # Try to get GPU from /proc/cpuinfo
+        with open('/proc/cpuinfo', 'r') as f:
+            for line in f:
+                if 'Features' in line and 'gpu' in line.lower():
+                    return "Integrated GPU"
+    except:
+        pass
+    
+    return None
+
+
+def get_memory_info():
+    """Get detailed memory information including swap."""
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.read()
+        
+        mem_data = {}
+        for line in meminfo.split('\n'):
+            if ':' in line:
+                key, value = line.split(':', 1)
+                # Extract number (in kB)
+                num_match = re.search(r'(\d+)', value)
+                if num_match:
+                    mem_data[key.strip()] = int(num_match.group(1))
+        
+        # Memory
+        mem_total = mem_data.get('MemTotal', 0)
+        mem_available = mem_data.get('MemAvailable', 0)
+        
+        if not mem_available:
+            mem_free = mem_data.get('MemFree', 0)
+            mem_cached = mem_data.get('Cached', 0)
+            mem_available = mem_free + mem_cached
+        
+        mem_used = mem_total - mem_available
+        
+        # Swap
+        swap_total = mem_data.get('SwapTotal', 0)
+        swap_free = mem_data.get('SwapFree', 0)
+        swap_used = swap_total - swap_free if swap_total > 0 else 0
+        
+        return {
+            'mem_used': mem_used // 1024,  # Convert to MB
+            'mem_total': mem_total // 1024,
+            'swap_used': swap_used // 1024 if swap_total > 0 else None,
+            'swap_total': swap_total // 1024 if swap_total > 0 else None
+        }
+    except:
+        memory = psutil.virtual_memory()
+        return {
+            'mem_used': memory.used // (1024 * 1024),
+            'mem_total': memory.total // (1024 * 1024),
+            'swap_used': None,
+            'swap_total': None
+        }
+
+
+def get_network_info():
+    """Get network interface information."""
+    interfaces = []
+    
+    if shutil.which('ip'):
+        try:
+            result = subprocess.run(['ip', 'addr', 'show'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                current_interface = None
+                for line in result.stdout.split('\n'):
+                    # Parse interface name
+                    if line and not line.startswith(' '):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            current_interface = parts[1].rstrip(':')
+                    
+                    # Parse IP addresses
+                    elif 'inet ' in line and '127.0.0.1' not in line:
+                        parts = line.strip().split()
+                        for i, part in enumerate(parts):
+                            if part == 'inet' and i + 1 < len(parts):
+                                ip_addr = parts[i + 1].split('/')[0]
+                                if current_interface and ip_addr:
+                                    interfaces.append(f"{current_interface}: {ip_addr}")
+                                break
+        except:
+            pass
+    
+    return interfaces
+
+
+def get_locale_info():
+    """Get system locale information."""
+    return os.environ.get('LANG', 'Unknown')
+
+
+def get_packages_count():
+    """Get package count with better detection."""
+    try:
+        # Try dpkg first
+        result = subprocess.run(['dpkg', '-l'], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            count = 0
+            for line in result.stdout.split('\n'):
+                if line.startswith('ii'):
+                    count += 1
+            if count > 0:
+                return count, "dpkg"
+    except:
+        pass
+    
+    try:
+        # Try pkg for Termux
+        result = subprocess.run(['pkg', 'list-installed'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            lines = [line for line in result.stdout.strip().split('\n') if line.strip()]
+            if lines:
+                return len(lines), "pkg"
+    except:
+        pass
+    
+    try:
+        # Alternative: count in dpkg status file
+        dpkg_status = '/data/data/com.termux/files/usr/var/lib/dpkg/status'
+        if os.path.exists(dpkg_status):
+            with open(dpkg_status, 'r') as f:
+                count = f.read().count('Package:')
+                if count > 0:
+                    return count, "dpkg"
+    except:
+        pass
+    
+    return 0, "unknown"
 
 
 @bot.add_cmd(cmd="sysinfo")
@@ -145,29 +357,20 @@ async def get_system_info_text() -> str:
                 release += f" (API {android_info['api_level']})"
         
         # CPU Information
-        cpu_info = platform.processor() or "Unknown CPU"
-        if is_android_system:
-            # Try to get more detailed CPU info on Android
-            try:
-                with open('/proc/cpuinfo', 'r') as f:
-                    for line in f:
-                        if line.startswith('Hardware'):
-                            cpu_info = line.split(':')[1].strip()
-                            break
-                        elif line.startswith('model name'):
-                            cpu_info = line.split(':')[1].strip()
-                            break
-            except:
-                pass
+        cpu_model, cpu_count, cpu_freq = get_cpu_info()
+        cpu_freq_str = f" @ {cpu_freq:.2f}GHz" if cpu_freq else ""
         
-        cpu_count = psutil.cpu_count(logical=True)
-        cpu_freq = psutil.cpu_freq()
-        cpu_freq_str = f"@ {cpu_freq.current/1000:.1f}GHz" if cpu_freq else ""
+        # GPU Information
+        gpu_info = get_gpu_info()
         
         # Memory Information
-        memory = psutil.virtual_memory()
-        memory_used = memory.used // (1024 * 1024)  # MB
-        memory_total = memory.total // (1024 * 1024)  # MB
+        mem_info = get_memory_info()
+        
+        # Network Information
+        network_interfaces = get_network_info()
+        
+        # Locale
+        locale = get_locale_info()
         
         # Uptime
         boot_time = datetime.fromtimestamp(psutil.boot_time())
@@ -189,14 +392,16 @@ async def get_system_info_text() -> str:
         terminal = "Unknown"
         if is_android_system:
             if 'TERMUX_VERSION' in os.environ:
-                terminal = f"Termux {os.environ.get('TERMUX_VERSION', '')}"
+                termux_ver = os.environ.get('TERMUX_VERSION', '')
+                terminal = f"Termux {termux_ver}" if termux_ver else "Termux"
             else:
                 terminal = "Android Terminal"
+        elif os.environ.get('TERM_PROGRAM'):
+            terminal = os.environ['TERM_PROGRAM']
         
         # Disk usage
         try:
             if is_android_system:
-                # For Android, check /data partition if accessible, otherwise /
                 disk_path = '/data' if os.path.exists('/data') and os.access('/data', os.R_OK) else '/'
             else:
                 disk_path = '/'
@@ -206,27 +411,8 @@ async def get_system_info_text() -> str:
         except:
             disk_used = disk_total = 0
         
-        # Package count for Android/Termux
-        packages = 0
-        package_manager = "Unknown"
-        if is_android_system:
-            try:
-                # Count Termux packages
-                result = subprocess.run(['pkg', 'list-installed'], 
-                                      capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    packages = len(result.stdout.strip().split('\n'))
-                    package_manager = "pkg"
-            except:
-                try:
-                    # Alternative: count in /data/data/com.termux/files/usr/var/lib/dpkg/status
-                    dpkg_status = '/data/data/com.termux/files/usr/var/lib/dpkg/status'
-                    if os.path.exists(dpkg_status):
-                        with open(dpkg_status, 'r') as f:
-                            packages = f.read().count('Package:')
-                        package_manager = "dpkg"
-                except:
-                    pass
+        # Package count
+        packages, package_manager = get_packages_count()
         
         # Format the output similar to neofetch
         ascii_art = get_ascii_art(system)
@@ -239,7 +425,8 @@ async def get_system_info_text() -> str:
         # OS line with device info for Android
         if is_android_system and (android_info.get('brand') or android_info.get('model')):
             device_info = f"{android_info.get('brand', '')} {android_info.get('model', '')}".strip()
-            info_lines.append(f"OS: {system} {release} on {device_info}")
+            info_lines.append(f"Host: {device_info}")
+            info_lines.append(f"OS: {system} {release} {machine}")
         else:
             info_lines.append(f"OS: {system} {release} {machine}")
         
@@ -255,20 +442,36 @@ async def get_system_info_text() -> str:
             f"Shell: {shell}",
         ])
         
-        if is_android_system and terminal != "Unknown":
+        if terminal != "Unknown":
             info_lines.append(f"Terminal: {terminal}")
         
-        info_lines.extend([
-            f"CPU: {cpu_info} ({cpu_count}) {cpu_freq_str}",
-            f"Memory: {memory_used}MiB / {memory_total}MiB",
-        ])
+        info_lines.append(f"CPU: {cpu_model} ({cpu_count}){cpu_freq_str}")
+        
+        if gpu_info:
+            info_lines.append(f"GPU: {gpu_info}")
+        
+        info_lines.append(f"Memory: {mem_info['mem_used']}MiB / {mem_info['mem_total']}MiB")
+        
+        if mem_info['swap_total']:
+            info_lines.append(f"Swap: {mem_info['swap_used']}MiB / {mem_info['swap_total']}MiB")
         
         if disk_total > 0:
             info_lines.append(f"Storage: {disk_used}GB / {disk_total}GB")
         
+        # Add network interfaces
+        for interface in network_interfaces[:2]:  # Limit to 2 interfaces
+            info_lines.append(f"Network: {interface}")
+        
+        # Add locale
+        if locale != "Unknown":
+            info_lines.append(f"Locale: {locale}")
+        
         # Add Android-specific info
-        if is_android_system and android_info.get('api_level'):
-            info_lines.append(f"API Level: {android_info['api_level']}")
+        if is_android_system:
+            if android_info.get('api_level'):
+                info_lines.append(f"API Level: {android_info['api_level']}")
+            if android_info.get('build_id'):
+                info_lines.append(f"Build: {android_info['build_id']}")
         
         info_lines.extend([
             f"Python: v{PY_VERSION}",
