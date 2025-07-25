@@ -3,6 +3,7 @@ import psutil
 import os
 import socket
 import subprocess
+import shutil
 from datetime import datetime, timedelta
 from sys import version_info
 
@@ -63,204 +64,139 @@ async def get_android_sysinfo():
         return f"Error running android.sh: {str(e)}"
 
 
-@bot.add_cmd(cmd="sysinfo")
-async def system_info(bot: BOT, message: Message):
-    # Check if running on Android
-    if is_android():
-        system_text = await get_android_sysinfo()
-    else:
-        # Inline System Info if Dual Mode
-        if bot.is_user and getattr(bot, "has_bot", False):
-            inline_result: BotResults = await bot.get_inline_bot_results(
-                bot=bot.bot.me.username, query="inline_sysinfo"
-            )
-            await bot.send_inline_bot_result(
-                chat_id=message.chat.id,
-                result_id=inline_result.results[0].id,
-                query_id=inline_result.query_id,
-            )
-            return
-
-        system_text = await get_system_info_text()
+def get_android_info():
+    """Get Android-specific information."""
+    android_info = {}
     
-    await bot.send_message(
-        chat_id=message.chat.id,
-        text=f"<pre>{system_text}</pre>",
-        reply_parameters=ReplyParameters(message_id=message.reply_id or message.id),
-    )
-
-
-_bot = getattr(bot, "bot", bot)
-if _bot.is_bot:
-
-    @_bot.on_inline_query(filters=filters.regex("^inline_sysinfo$"), group=2)
-    async def return_inline_sysinfo_results(client: BOT, inline_query: InlineQuery):
-        if is_android():
-            system_text = await get_android_sysinfo()
-        else:
-            system_text = await get_system_info_text()
-        
-        result = InlineQueryResultArticle(
-            title="System Information",
-            description="Send system information",
-            input_message_content=InputTextMessageContent(
-                message_text=f"<pre>{system_text}</pre>",
-                parse_mode="HTML"
-            ),
-        )
-
-        await inline_query.answer(results=[result], cache_time=60)
-
-
-async def get_system_info_text() -> str:
-    """Get system info for non-Android systems."""
-    try:
-        # Basic system info
-        hostname = socket.gethostname()
-        username = os.getenv('USER') or os.getenv('USERNAME') or 'unknown'
-        
-        # OS Information
-        system = platform.system()
-        release = platform.release()
-        machine = platform.machine()
-        
-        # CPU Information
-        cpu_info = platform.processor() or "Unknown CPU"
-        cpu_count = psutil.cpu_count(logical=True)
-        cpu_freq = psutil.cpu_freq()
-        cpu_freq_str = f"@ {cpu_freq.current/1000:.1f}GHz" if cpu_freq else ""
-        
-        # Memory Information
-        memory = psutil.virtual_memory()
-        memory_used = memory.used // (1024 * 1024)  # MB
-        memory_total = memory.total // (1024 * 1024)  # MB
-        memory_percent = int(memory.percent)
-        
-        # Uptime
-        boot_time = datetime.fromtimestamp(psutil.boot_time())
-        uptime = datetime.now() - boot_time
-        uptime_str = format_uptime(uptime)
-        
-        # Shell
-        shell = os.getenv('SHELL', 'Unknown')
-        if shell != 'Unknown':
-            shell = os.path.basename(shell)
-        
-        # Disk usage
+    if shutil.which('getprop'):
         try:
-            disk_usage = psutil.disk_usage('/')
-            disk_used = disk_usage.used // (1024**3)  # GB
-            disk_total = disk_usage.total // (1024**3)  # GB
+            # Get Android version
+            result = subprocess.run(['getprop', 'ro.build.version.release'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                android_info['version'] = result.stdout.strip()
+            
+            # Get API level
+            result = subprocess.run(['getprop', 'ro.build.version.sdk'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                android_info['api_level'] = result.stdout.strip()
+            
+            # Get device brand
+            result = subprocess.run(['getprop', 'ro.product.manufacturer'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                android_info['brand'] = result.stdout.strip()
+            
+            # Get device model
+            result = subprocess.run(['getprop', 'ro.product.model'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                android_info['model'] = result.stdout.strip()
+            
+            # Get build ID
+            result = subprocess.run(['getprop', 'ro.build.id'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                android_info['build_id'] = result.stdout.strip()
         except:
-            disk_used = disk_total = 0
-        
-        # Format the output
-        ascii_art = get_ascii_art(system)
-        
-        info_lines = [
-            f"{username}@{hostname}",
-            "-" * (len(username) + len(hostname) + 1),
-            f"OS: {system} {release} {machine}",
-            f"Kernel: {release}",
-            f"Uptime: {uptime_str}",
-            f"Shell: {shell}",
-            f"CPU: {cpu_info} ({cpu_count}) {cpu_freq_str}",
-            f"Memory: {memory_used}MiB / {memory_total}MiB ({memory_percent}%)",
-        ]
-        
-        if disk_total > 0:
-            info_lines.append(f"Storage: {disk_used}GB / {disk_total}GB")
-        
-        info_lines.extend([
-            f"Python: v{PY_VERSION}",
-            f"Pyrogram: v{pyro_version}",
-            f"Core: v{core_version}",
-        ])
-        
-        # Combine ASCII art with info
-        result = []
-        for i, line in enumerate(info_lines):
-            if i < len(ascii_art):
-                result.append(f"{ascii_art[i]:<30} {line}")
-            else:
-                result.append(f"{'':<30} {line}")
-        
-        # Add remaining ASCII art lines if any
-        for i in range(len(info_lines), len(ascii_art)):
-            result.append(ascii_art[i])
-        
-        return "\n".join(result)
-        
-    except Exception as e:
-        return f"Error gathering system information: {str(e)}"
-
-
-def format_uptime(uptime: timedelta) -> str:
-    """Format uptime in a human-readable way."""
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
+            pass
     
-    if days > 0:
-        return f"{days} days, {hours} hours, {minutes} mins"
-    elif hours > 0:
-        return f"{hours} hours, {minutes} mins"
-    else:
-        return f"{minutes} mins"
+    return android_info
 
 
-def get_ascii_art(system: str) -> list:
-    """Get simple ASCII art based on the operating system."""
-    if system.lower() == "linux":
-        return [
-            "        #####",
-            "       #######",
-            "       ##O#O##",
-            "       #######",
-            "     ###########",
-            "    #############",
-            "   ###############",
-            "   ################",
-            "  #################",
-        ]
-    elif system.lower() == "windows":
-        return [
-            "        ################",
-            "        ################",
-            "        ################",
-            "        ################",
-            "        ################",
-            "        ################",
-            "        ################",
-            "        ################",
-            "        ################",
-        ]
-    elif system.lower() == "darwin":  # macOS
-        return [
-            "                    'c.",
-            "                 ,xNMM.",
-            "               .OMMMMo",
-            "               OMMM0,",
-            "     .;loddo:' loolloddol;.",
-            "   cKMMMMMMMMMMNWMMMMMMMMMM0:",
-            " .KMMMMMMMMMMMMMMMMMMMMMMMWd.",
-            " XMMMMMMMMMMMMMMMMMMMMMMMX.",
-            ";MMMMMMMMMMMMMMMMMMMMMMMM:",
-            ":MMMMMMMMMMMMMMMMMMMMMMMM:",
-        ]
-    else:
-        return [
-            "   ╔══════════════════════╗",
-            "   ║                      ║",
-            "   ║      SYSTEM INFO     ║",
-            "   ║                      ║",
-            "   ╚══════════════════════╝",
-            "",
-            "",
-            "",
-            "",
-        ]
-                return f"{shell_name} {version}"
+def get_cpu_info():
+    """Get CPU information."""
+    try:
+        # CPU model
+        cpu_model = platform.processor() or "Unknown CPU"
+        if cpu_model == "Unknown CPU" and os.path.exists('/proc/cpuinfo'):
+            with open('/proc/cpuinfo', 'r') as f:
+                for line in f:
+                    if line.startswith('model name'):
+                        cpu_model = line.split(':', 1)[1].strip()
+                        break
+                    elif line.startswith('Hardware'):
+                        cpu_model = line.split(':', 1)[1].strip()
+                        break
+        
+        # CPU count
+        cpu_count = psutil.cpu_count(logical=True)
+        
+        # CPU frequency
+        cpu_freq = None
+        try:
+            freq_info = psutil.cpu_freq()
+            if freq_info:
+                cpu_freq = freq_info.current / 1000  # Convert MHz to GHz
+        except:
+            pass
+        
+        return cpu_model, cpu_count, cpu_freq
+    except:
+        return "Unknown CPU", 1, None
+
+
+def get_enhanced_gpu_info():
+    """Get GPU information."""
+    if is_android() and shutil.which('getprop'):
+        try:
+            result = subprocess.run(['getprop', 'ro.hardware.vulkan'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            
+            result = subprocess.run(['getprop', 'ro.hardware.egl'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except:
+            pass
+    
+    return None
+
+
+def get_enhanced_memory_info():
+    """Get enhanced memory information."""
+    try:
+        memory = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
+        return {
+            'mem_used': memory.used // (1024 * 1024),  # MB
+            'mem_total': memory.total // (1024 * 1024),  # MB
+            'mem_percent': int(memory.percent),
+            'swap_used': swap.used // (1024 * 1024) if swap else 0,  # MB
+            'swap_total': swap.total // (1024 * 1024) if swap else 0,  # MB
+            'swap_percent': int(swap.percent) if swap and swap.total > 0 else 0,
+        }
+    except:
+        return {
+            'mem_used': 0, 'mem_total': 0, 'mem_percent': 0,
+            'swap_used': 0, 'swap_total': 0, 'swap_percent': 0,
+        }
+
+
+def get_shell_info():
+    """Get shell information with version."""
+    shell = os.getenv('SHELL', 'Unknown')
+    if shell == 'Unknown':
+        return shell
+    
+    shell_name = os.path.basename(shell)
+    
+    try:
+        if shutil.which(shell_name):
+            result = subprocess.run([shell_name, '--version'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                # Extract version from output
+                version_line = result.stdout.split('\n')[0]
+                import re
+                version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', version_line)
+                if version_match:
+                    version = version_match.group(1)
+                    return f"{shell_name} {version}"
     except:
         pass
     
@@ -418,19 +354,23 @@ def get_packages_count():
 
 @bot.add_cmd(cmd="sysinfo")
 async def system_info(bot: BOT, message: Message):
-    # Inline System Info if Dual Mode
-    if bot.is_user and getattr(bot, "has_bot", False):
-        inline_result: BotResults = await bot.get_inline_bot_results(
-            bot=bot.bot.me.username, query="inline_sysinfo"
-        )
-        await bot.send_inline_bot_result(
-            chat_id=message.chat.id,
-            result_id=inline_result.results[0].id,
-            query_id=inline_result.query_id,
-        )
-        return
+    # Check if running on Android
+    if is_android():
+        system_text = await get_android_sysinfo()
+    else:
+        # Inline System Info if Dual Mode
+        if bot.is_user and getattr(bot, "has_bot", False):
+            inline_result: BotResults = await bot.get_inline_bot_results(
+                bot=bot.bot.me.username, query="inline_sysinfo"
+            )
+            await bot.send_inline_bot_result(
+                chat_id=message.chat.id,
+                result_id=inline_result.results[0].id,
+                query_id=inline_result.query_id,
+            )
+            return
 
-    system_text = await get_system_info_text()
+        system_text = await get_system_info_text()
     
     await bot.send_message(
         chat_id=message.chat.id,
@@ -444,7 +384,10 @@ if _bot.is_bot:
 
     @_bot.on_inline_query(filters=filters.regex("^inline_sysinfo$"), group=2)
     async def return_inline_sysinfo_results(client: BOT, inline_query: InlineQuery):
-        system_text = await get_system_info_text()
+        if is_android():
+            system_text = await get_android_sysinfo()
+        else:
+            system_text = await get_system_info_text()
         
         result = InlineQueryResultArticle(
             title="System Information",
@@ -635,21 +578,15 @@ def get_ascii_art(system: str) -> list:
     """Get simple ASCII art based on the operating system."""
     if system.lower() == "android":
         return [
-            "         -o          o-",
-            "          +hydNNNNNdyh+",
-            "       +mMMMMMMMMMMMMMMm+",
-            "     /MMM+:+MMMMMMMMMMMy/+MMM/",
-            "   +MMM+     +MMMMMMMMMMd     +MMM+",
-            "  mMMM:       dMMMMMMMMM       :MMMs",
-            " /MMM-         +MMMMMMMy         -MMM/",
-            " +MMM-          sMMMMMN          -MMM+",
-            "  mMMM/       /dyMMMMMMMMy/       /MMMs",
-            "   sMMMMMNmmyMMMMMMMMMMMMMMMMNmmyMMMMM",
-            "     +MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM+",
-            "       /mMMMMMMMMMMMMMMMMMMMMMMMMm/",
-            "          /dMMMMMMMMMMMMMMMMMMd/",
-            "             +++DMMMMMMMMMd+++",
-            "                  +++DMMMM+++",
+            "    o- ",
+            "   +mMMMMMMMMMMMMm+",
+            "  `dMMm:NMMMMMMN:mMMd`",
+            "  hMMMMMMMMMMMMMMMMMMh",
+            "  yyyyyyyyyyyyyyyyyyyy",
+            " .mMMm`MMMMMMMMMMMMMMMM`mMMm.",
+            " :MMMM-MMMMMMMMMMMMMMMM-MMMM:",
+            " :MMMM-MMMMMMMMMMMMMMMM-MMMM:",
+            " :MMMM-MMMMMMMMMMMMMMMM-MMMM:",
         ]
     elif system.lower() == "linux":
         return [
@@ -682,6 +619,69 @@ def get_ascii_art(system: str) -> list:
             "               .OMMMMo",
             "               OMMM0,",
             "     .;loddo:' loolloddol;.",
+            "   cKMMMMMMMMMMNWMMMMMMMMMM0:",
+            " .KMMMMMMMMMMMMMMMMMMMMMMMWd.",
+            " XMMMMMMMMMMMMMMMMMMMMMMMX.",
+            ";MMMMMMMMMMMMMMMMMMMMMMMM:",
+            ":MMMMMMMMMMMMMMMMMMMMMMMM:",
+        ]
+    else:
+        return [
+            "   ╔══════════════════════╗",
+            "   ║                      ║",
+            "   ║      SYSTEM INFO     ║",
+            "   ║                      ║",
+            "   ╚══════════════════════╝",
+            "",
+            "",
+            "",
+            "",
+        ]
+            "       ##O#O##",
+            "       #######",
+            "     ###########",
+            "    #############",
+            "   ###############",
+            "   ################",
+            "  #################",
+        ]
+    elif system.lower() == "windows":
+        return [
+            "        ################",
+            "        ################",
+            "        ################",
+            "        ################",
+            "        ################",
+            "        ################",
+            "        ################",
+            "        ################",
+            "        ################",
+        ]
+    elif system.lower() == "darwin":  # macOS
+        return [
+            "                    'c.",
+            "                 ,xNMM.",
+            "               .OMMMMo",
+            "               OMMM0,",
+            "     .;loddo:' loolloddol;.",
+            "   cKMMMMMMMMMMNWMMMMMMMMMM0:",
+            " .KMMMMMMMMMMMMMMMMMMMMMMMWd.",
+            " XMMMMMMMMMMMMMMMMMMMMMMMX.",
+            ";MMMMMMMMMMMMMMMMMMMMMMMM:",
+            ":MMMMMMMMMMMMMMMMMMMMMMMM:",
+        ]
+    else:
+        return [
+            "   ╔══════════════════════╗",
+            "   ║                      ║",
+            "   ║      SYSTEM INFO     ║",
+            "   ║                      ║",
+            "   ╚══════════════════════╝",
+            "",
+            "",
+            "",
+            "",
+        ]
             "   cKMMMMMMMMMMNWMMMMMMMMMM0:",
             " .KMMMMMMMMMMMMMMMMMMMMMMMWd.",
             " XMMMMMMMMMMMMMMMMMMMMMMMX.",
