@@ -1,10 +1,10 @@
 import os
 from pathlib import Path
 
-from app import BOT, Message
+from app import BOT, Message, bot
 
 
-@BOT.add_cmd(cmd="plugins")
+@bot.add_cmd(cmd="plugins")
 async def list_plugins(bot: BOT, message: Message):
     """
     CMD: PLUGINS
@@ -14,8 +14,8 @@ async def list_plugins(bot: BOT, message: Message):
     response = await message.reply("WARNING <b>Loading plugin list...</b>")
     
     try:
-        # Get the plugins directory path
-        plugins_dir = Path(__file__).parent.parent / "plugins"
+        # Get the plugins directory path - app/plugins/
+        plugins_dir = Path(__file__).parent.parent.parent / "app" / "plugins"
         
         if not plugins_dir.exists():
             await response.edit("ERROR <b>Plugins directory not found!</b>")
@@ -64,7 +64,7 @@ async def list_plugins(bot: BOT, message: Message):
         await response.edit(f"ERROR <b>Error loading plugins:</b>\n<code>{str(e)}</code>")
 
 
-@BOT.add_cmd(cmd="pluginfo")
+@bot.add_cmd(cmd="pluginfo")
 async def plugin_info(bot: BOT, message: Message):
     """
     CMD: PLUGINFO
@@ -79,7 +79,7 @@ async def plugin_info(bot: BOT, message: Message):
     response = await message.reply(f"WARNING <b>Getting info for category: {category}</b>")
     
     try:
-        plugins_dir = Path(__file__).parent.parent / "plugins" / category
+        plugins_dir = Path(__file__).parent.parent.parent / "app" / "plugins" / category
         
         if not plugins_dir.exists():
             await response.edit(f"ERROR <b>Category '{category}' not found!</b>")
