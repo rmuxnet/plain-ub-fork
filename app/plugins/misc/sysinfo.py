@@ -138,36 +138,46 @@ def get_cpu_info():
         return platform.processor() or "Unknown CPU", psutil.cpu_count(logical=True), None
 
 
-def get_gpu_info():
-    """Get GPU information for Android devices."""
+def get_enhanced_gpu_info():
+    """GPU detection for Android devices."""
     if not is_android():
         return None
     
+    gpu_options = [
+        'ro.hardware.vulkan',
+        'ro.hardware.egl',
+        'ro.hardware.gralloc',
+        'ro.board.platform',
+        'ro.chipname'
+    ]
+    
+    for prop in gpu_options:
+        try:
+            result = subprocess.run(['getprop', prop], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                gpu_value = result.stdout.strip()
+                if gpu_value and gpu_value != 'unknown' and len(gpu_value) > 2:
+                    return gpu_value
+        except:
+            continue
+    
+    # Try to get GPU info from /proc/cpuinfo
     try:
-        # Try getprop for GPU info
-        result = subprocess.run(['getprop', 'ro.hardware.vulkan'], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        
-        result = subprocess.run(['getprop', 'ro.hardware.egl'], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        
-        # Try to get GPU from /proc/cpuinfo
         with open('/proc/cpuinfo', 'r') as f:
-            for line in f:
-                if 'Features' in line and 'gpu' in line.lower():
-                    return "Integrated GPU"
+            cpuinfo = f.read()
+            if 'gpu' in cpuinfo.lower() or 'mali' in cpuinfo.lower() or 'adreno' in cpuinfo.lower():
+                for line in cpuinfo.split('\n'):
+                    if any(keyword in line.lower() for keyword in ['gpu', 'mali', 'adreno']):
+                        return "Integrated GPU"
     except:
         pass
     
     return None
 
 
-def get_memory_info():
-    """Get detailed memory information including swap."""
+def get_enhanced_memory_info():
+    """Get enhanced memory information with percentages."""
     try:
         with open('/proc/meminfo', 'r') as f:
             meminfo = f.read()
@@ -181,36 +191,152 @@ def get_memory_info():
                 if num_match:
                     mem_data[key.strip()] = int(num_match.group(1))
         
-        # Memory
+        # Memory calculations
         mem_total = mem_data.get('MemTotal', 0)
         mem_available = mem_data.get('MemAvailable', 0)
         
         if not mem_available:
             mem_free = mem_data.get('MemFree', 0)
             mem_cached = mem_data.get('Cached', 0)
-            mem_available = mem_free + mem_cached
+            mem_buffers = mem_data.get('Buffers', 0)
+            mem_available = mem_free + mem_cached + mem_buffers
         
         mem_used = mem_total - mem_available
+        mem_percent = int((mem_used * 100) / mem_total) if mem_total > 0 else 0
         
-        # Swap
+        # Swap calculations
         swap_total = mem_data.get('SwapTotal', 0)
         swap_free = mem_data.get('SwapFree', 0)
         swap_used = swap_total - swap_free if swap_total > 0 else 0
+        swap_percent = int((swap_used * 100) / swap_total) if swap_total > 0 else 0
         
         return {
             'mem_used': mem_used // 1024,  # Convert to MB
             'mem_total': mem_total // 1024,
+            'mem_percent': mem_percent,
             'swap_used': swap_used // 1024 if swap_total > 0 else None,
-            'swap_total': swap_total // 1024 if swap_total > 0 else None
+            'swap_total': swap_total // 1024 if swap_total > 0 else None,
+            'swap_percent': swap_percent if swap_total > 0 else None
         }
     except:
+        # Fallback to psutil
         memory = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
         return {
             'mem_used': memory.used // (1024 * 1024),
             'mem_total': memory.total // (1024 * 1024),
-            'swap_used': None,
-            'swap_total': None
+            'mem_percent': int(memory.percent),
+            'swap_used': swap.used // (1024 * 1024) if swap.total > 0 else None,
+            'swap_total': swap.total // (1024 * 1024) if swap.total > 0 else None,
+            'swap_percent': int(swap.percent) if swap.total > 0 else None
         }
+
+
+def get_shell_info():
+    """Get shell information with version."""
+    shell_path = os.getenv('SHELL', 'Unknown')
+    if shell_path == 'Unknown':
+        return shell_path
+    
+    shell_name = os.path.basename(shell_path)
+    
+    # Try to get version
+    try:
+        if shell_name == 'bash':
+            result = subprocess.run(['bash', '--version'], 
+                                  capture_output=True, text=True, timeout=5)
+        elif shell_name == 'zsh':
+            result = subprocess.run(['zsh', '--version'], 
+                                  capture_output=True, text=True, timeout=5)
+        elif shell_name == 'fish':
+            result = subprocess.run(['fish', '--version'], 
+                                  capture_output=True, text=True, timeout=5)
+        else:
+            return shell_name
+        
+        if result.returncode == 0 and result.stdout:
+            # Extract version number using regex
+            version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', result.stdout)
+            if version_match:
+                version = version_match.group(1)
+                return f"{shell_name} {version}"
+    except:
+        pass
+    
+    return shell_name
+
+
+def get_disk_usage():
+    """Get disk usage information for multiple storage locations."""
+    disk_info = []
+    
+    try:
+        # Check if we can use df command
+        if shutil.which('df'):
+            # Root filesystem
+            try:
+                result = subprocess.run(['df', '-h', '/'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    if len(lines) > 1:
+                        parts = lines[1].split()
+                        if len(parts) >= 6:
+                            used, total = parts[2], parts[1]
+                            disk_info.append(f"Disk (/): {used} / {total}")
+            except:
+                pass
+            
+            # Android external storage
+            if is_android():
+                storage_paths = [
+                    '/storage/emulated/0',
+                    '/sdcard',
+                    '/storage/self/primary'
+                ]
+                
+                for storage_path in storage_paths:
+                    if os.path.exists(storage_path):
+                        try:
+                            result = subprocess.run(['df', '-h', storage_path], 
+                                                  capture_output=True, text=True, timeout=5)
+                            if result.returncode == 0:
+                                lines = result.stdout.strip().split('\n')
+                                if len(lines) > 1:
+                                    parts = lines[1].split()
+                                    if len(parts) >= 6:
+                                        used, total = parts[2], parts[1]
+                                        storage_name = storage_path.split('/')[-1] or 'storage'
+                                        disk_info.append(f"Disk ({storage_name}): {used} / {total}")
+                                        break  # Only add one external storage entry
+                        except:
+                            continue
+        
+        # Fallback to psutil if df command failed
+        if not disk_info:
+            if is_android():
+                # Try multiple Android paths
+                paths_to_check = ['/data', '/storage/emulated/0', '/']
+            else:
+                paths_to_check = ['/']
+            
+            for path in paths_to_check:
+                try:
+                    if os.path.exists(path) and os.access(path, os.R_OK):
+                        disk_usage = psutil.disk_usage(path)
+                        used_gb = disk_usage.used // (1024**3)
+                        total_gb = disk_usage.total // (1024**3)
+                        path_name = path.replace('/storage/emulated/0', 'storage').replace('/', 'root')
+                        disk_info.append(f"Disk ({path_name}): {used_gb}GB / {total_gb}GB")
+                        if len(disk_info) >= 2:  # Limit to 2 disk entries
+                            break
+                except:
+                    continue
+    except:
+        pass
+    
+    return disk_info
 
 
 def get_network_info():
@@ -361,16 +487,22 @@ async def get_system_info_text() -> str:
         cpu_freq_str = f" @ {cpu_freq:.2f}GHz" if cpu_freq else ""
         
         # GPU Information
-        gpu_info = get_gpu_info()
+        gpu_info = get_enhanced_gpu_info()
         
         # Memory Information
-        mem_info = get_memory_info()
+        mem_info = get_enhanced_memory_info()
         
         # Network Information
         network_interfaces = get_network_info()
         
+        # Disk Information
+        disk_info = get_disk_usage()
+        
         # Locale
         locale = get_locale_info()
+        
+        # Shell Information
+        shell_info = get_shell_info()
         
         # Uptime
         boot_time = datetime.fromtimestamp(psutil.boot_time())
@@ -379,16 +511,11 @@ async def get_system_info_text() -> str:
         
         # Kernel
         if is_android_system:
-            kernel = platform.release()
+            kernel = f"Linux {platform.release()}"
         else:
             kernel = platform.release() if system == "Linux" else f"{system} {release}"
         
-        # Shell
-        shell = os.getenv('SHELL', 'Unknown')
-        if shell != 'Unknown':
-            shell = os.path.basename(shell)
-        
-        # Terminal detection for Android
+        # Terminal detection
         terminal = "Unknown"
         if is_android_system:
             if 'TERMUX_VERSION' in os.environ:
@@ -398,18 +525,10 @@ async def get_system_info_text() -> str:
                 terminal = "Android Terminal"
         elif os.environ.get('TERM_PROGRAM'):
             terminal = os.environ['TERM_PROGRAM']
-        
-        # Disk usage
-        try:
-            if is_android_system:
-                disk_path = '/data' if os.path.exists('/data') and os.access('/data', os.R_OK) else '/'
-            else:
-                disk_path = '/'
-            disk_usage = psutil.disk_usage(disk_path)
-            disk_used = disk_usage.used // (1024**3)  # GB
-            disk_total = disk_usage.total // (1024**3)  # GB
-        except:
-            disk_used = disk_total = 0
+        else:
+            term = os.environ.get('TERM', '')
+            if term and term != 'Unknown':
+                terminal = term
         
         # Package count
         packages, package_manager = get_packages_count()
@@ -438,9 +557,7 @@ async def get_system_info_text() -> str:
         if packages > 0:
             info_lines.append(f"Packages: {packages} ({package_manager})")
         
-        info_lines.extend([
-            f"Shell: {shell}",
-        ])
+        info_lines.append(f"Shell: {shell_info}")
         
         if terminal != "Unknown":
             info_lines.append(f"Terminal: {terminal}")
@@ -450,23 +567,26 @@ async def get_system_info_text() -> str:
         if gpu_info:
             info_lines.append(f"GPU: {gpu_info}")
         
-        info_lines.append(f"Memory: {mem_info['mem_used']}MiB / {mem_info['mem_total']}MiB")
+        # Memory with percentage
+        info_lines.append(f"Memory: {mem_info['mem_used']}MiB / {mem_info['mem_total']}MiB ({mem_info['mem_percent']}%)")
         
+        # Swap if available
         if mem_info['swap_total']:
-            info_lines.append(f"Swap: {mem_info['swap_used']}MiB / {mem_info['swap_total']}MiB")
+            info_lines.append(f"Swap: {mem_info['swap_used']}MiB / {mem_info['swap_total']}MiB ({mem_info['swap_percent']}%)")
         
-        if disk_total > 0:
-            info_lines.append(f"Storage: {disk_used}GB / {disk_total}GB")
+        # Disk information
+        for disk_entry in disk_info:
+            info_lines.append(disk_entry)
         
-        # Add network interfaces
-        for interface in network_interfaces[:2]:  # Limit to 2 interfaces
-            info_lines.append(f"Network: {interface}")
+        # Network interfaces (limit to 2)
+        for interface in network_interfaces[:2]:
+            info_lines.append(f"Local IP: {interface}")
         
-        # Add locale
+        # Locale
         if locale != "Unknown":
             info_lines.append(f"Locale: {locale}")
         
-        # Add Android-specific info
+        # Android-specific info
         if is_android_system:
             if android_info.get('api_level'):
                 info_lines.append(f"API Level: {android_info['api_level']}")
